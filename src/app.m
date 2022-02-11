@@ -50,10 +50,12 @@
           NSLog(@"Error encountered on listener state change: %@", error);
         } else {
           switch (state) {
-          case nw_listener_state_ready:
-            NSLog(@"Accepting connections on :%d",
-                  nw_listener_get_port(self.listener));
+          case nw_listener_state_ready: {
+            uint16_t port = nw_listener_get_port(self.listener);
+            NSLog(@"Accepting connections on :%d", port);
+            printf("%u\n", (unsigned int)port);
             break;
+          }
           case nw_listener_state_failed:
             NSLog(@"failed state");
             break;
