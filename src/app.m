@@ -172,11 +172,8 @@ void sendAppearanceToConnection(nw_connection_t connection, bool isDark,
 }
 
 nw_connection_t connect_to_local_instance() {
-  // TODO(haze): see if it works without
-  nw_endpoint_t localEndpoint = nw_endpoint_create_host("::", "0");
   nw_endpoint_t endpoint = nw_endpoint_create_bonjour_service(
-      nw_endpoint_get_hostname(localEndpoint), BONJOUR_SERVICE_TCP_TYPE,
-      BONJOUR_SERVICE_DOMAIN);
+      "::", BONJOUR_SERVICE_TCP_TYPE, BONJOUR_SERVICE_DOMAIN);
 
   nw_parameters_t parameters = nw_parameters_create_secure_tcp(
       NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
