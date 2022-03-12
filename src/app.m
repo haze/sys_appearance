@@ -1,7 +1,10 @@
 #include "app.h"
+#include <stdlib.h>
 
 #define BONJOUR_SERVICE_TCP_TYPE "_sys_appearance._tcp"
 #define BONJOUR_SERVICE_DOMAIN "local"
+
+#define NSEC_PER_MS 1000000
 
 @implementation AppearanceServer
 
@@ -25,7 +28,7 @@
 
   nw_release(listenerParameters);
 
-  nw_endpoint_t localEndpoint = nw_endpoint_create_host("", "");
+  nw_endpoint_t localEndpoint = nw_endpoint_create_host("::", "0");
 
   nw_advertise_descriptor_t advertise =
       nw_advertise_descriptor_create_bonjour_service(
@@ -168,7 +171,133 @@ void sendAppearanceToConnection(nw_connection_t connection, bool isDark,
                      });
 }
 
+nw_connection_t connect_to_local_instance() {
+  // TODO(haze): see if it works without
+  nw_endpoint_t localEndpoint = nw_endpoint_create_host("::", "0");
+  nw_endpoint_t endpoint = nw_endpoint_create_bonjour_service(
+      nw_endpoint_get_hostname(localEndpoint), BONJOUR_SERVICE_TCP_TYPE,
+      BONJOUR_SERVICE_DOMAIN);
+
+  nw_parameters_t parameters = nw_parameters_create_secure_tcp(
+      NW_PARAMETERS_DISABLE_PROTOCOL, NW_PARAMETERS_DEFAULT_CONFIGURATION);
+
+  nw_connection_t connection = nw_connection_create(endpoint, parameters);
+  nw_release(endpoint);
+  nw_release(parameters);
+
+  return connection;
+}
+
+void receiveLoop(nw_connection_t connection) {
+  nw_connection_receive(
+      connection, 1, UINT32_MAX,
+      ^(dispatch_data_t content, nw_content_context_t context, bool is_complete,
+        nw_error_t receive_error) {
+        nw_retain(context);
+        dispatch_block_t schedule_next_receive = ^{
+          if (is_complete &&
+              (context == NULL || nw_content_context_get_is_final(context))) {
+            return;
+          }
+
+          // If there was no error in receiving, request more data
+          if (receive_error == NULL) {
+            receiveLoop(connection);
+          }
+          nw_release(context);
+        };
+
+        if (content != NULL) {
+          // If there is content, write it to stdout asynchronously
+          schedule_next_receive = Block_copy(schedule_next_receive);
+          dispatch_write(
+              1, content, dispatch_get_main_queue(),
+              ^(__unused dispatch_data_t _Nullable data, int stdout_error) {
+                if (stdout_error != 0) {
+                  errno = stdout_error;
+                  NSLog(@"Failed to write current system appearance to stdout: "
+                        @"%d",
+                        errno);
+                }
+                Block_release(schedule_next_receive);
+                exit(0);
+              });
+        } else {
+          // Content was NULL, so directly schedule the next receive
+          schedule_next_receive();
+        }
+      });
+}
+
+void printOneshotResult(uint16_t timeoutInMilliseconds) {
+  nw_connection_t connection = connect_to_local_instance();
+
+  if (connection == NULL) {
+    NSLog(@"Failed to find local instance running using bonjour");
+    return;
+  }
+
+  nw_connection_set_queue(connection, dispatch_get_main_queue());
+  nw_retain(connection);
+
+  nw_connection_set_state_changed_handler(
+      connection, ^(nw_connection_state_t state, nw_error_t error) {
+        nw_endpoint_t remote = nw_connection_copy_endpoint(connection);
+        if (state == nw_connection_state_waiting) {
+          NSLog(@"Connect to %s port %u failed, is waiting",
+                nw_endpoint_get_hostname(remote), nw_endpoint_get_port(remote));
+        } else if (state == nw_connection_state_failed) {
+          NSLog(@"Connect to %s port %u failed",
+                nw_endpoint_get_hostname(remote), nw_endpoint_get_port(remote));
+        } else if (state == nw_connection_state_cancelled) {
+          // Release the primary reference on the connection
+          // that was taken at creation time
+          nw_release(connection);
+        }
+
+        nw_release(remote);
+      });
+
+  nw_connection_start(connection);
+
+  dispatch_queue_t globalQueue =
+      dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_LOW, 0);
+  dispatch_source_t timerDispatchSource =
+      dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, globalQueue);
+
+  if (timerDispatchSource) {
+    dispatch_time_t startTime =
+        dispatch_time(DISPATCH_TIME_NOW, timeoutInMilliseconds * NSEC_PER_MS);
+    dispatch_source_set_timer(timerDispatchSource, startTime,
+                              DISPATCH_TIME_FOREVER, 8000ull);
+    dispatch_source_set_event_handler(timerDispatchSource, ^() {
+      dispatch_source_cancel(timerDispatchSource);
+      NSLog(@"Timeout reached. Forcibly exiting...");
+      exit(0);
+    });
+    dispatch_resume(timerDispatchSource);
+  } else {
+    NSLog(@"Failed to create timeout timer");
+  }
+
+  receiveLoop(connection);
+
+  dispatch_main();
+}
+
 int main(int argc, const char *argv[]) {
+  uint16_t oneshotTimeoutInMilliseconds = 5000;
+  for (size_t arg = 0; arg < argc; arg += 1) {
+    if (strcmp(argv[arg], "oneshot") == 0) {
+      if (argc > arg + 1) {
+        NSLog(@"Interpreting next argument as TCP connection timeout...");
+        oneshotTimeoutInMilliseconds = strtoul(argv[arg + 1], NULL, 10);
+        NSLog(@"Custom timeout: %dms", oneshotTimeoutInMilliseconds);
+      }
+      printOneshotResult(oneshotTimeoutInMilliseconds);
+      return EXIT_SUCCESS;
+    }
+  }
   NSApplication.sharedApplication.delegate = [AppDelegate new];
   NSApplicationMain(argc, argv);
 }
